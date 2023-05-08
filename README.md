@@ -26,6 +26,10 @@ cross build --target x86_64-unknown-linux-gnu --release
 RUSTFLAGS="-C target-feature=-crt-static" cross build --target x86_64-unknown-linux-musl --release
 ```
 
+## Alternatives
+
+https://github.com/pdlan/binder provides a cleaner, better implementation of this idea (+ IPv4-mapped IPv6 address support) with seccomp user notification. It requires Linux 5.6+.
+
 ## Notes
 
 `redhook` is modified to provide musl building support.
