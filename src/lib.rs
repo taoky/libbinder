@@ -145,6 +145,8 @@ hook! {
                 }
                 return -1;
             }
+            // Here we set addrlen to 0, to ensure that only our custom logic is executed
+            // Otherwise, the binded address port may not be 0, and unexpected behavior may occur
             my_bind(sockfd, addr, 0);
             real!(connect)(sockfd, addr, addrlen)
         }
