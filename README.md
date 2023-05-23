@@ -28,7 +28,7 @@ RUSTFLAGS="-C target-feature=-crt-static" cross build --target x86_64-unknown-li
 
 ## Alternatives
 
-https://github.com/pdlan/binder provides a cleaner, better implementation of this idea (+ IPv4-mapped IPv6 address support) with seccomp user notification. It requires Linux 5.6+.
+https://github.com/pdlan/binder provides a cleaner, better implementation of this idea with seccomp user notification. It requires Linux 5.6+, and custom seccomp policy is required when used in Docker. v0.0.2 of libbinder has been modified to align with this impl.
 
 ## Notes
 

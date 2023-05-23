@@ -1,6 +1,6 @@
 [package]
 name = "binder"
-version = "0.1.0"
+version = "0.0.2"
 edition = "2021"
 description = "Bind IP for TCP connections of arbitrary dynamic programs."
 
