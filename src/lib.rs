@@ -115,8 +115,8 @@ static ALLOWLIST: Vec<AddressInfo> = {
     res
 };
 
-// #[ctor]
-// static IS_BIND_DEBUG: bool = env::var("BIND_DEBUG").is_ok();
+#[ctor]
+static IS_BIND_DEBUG: bool = env::var("BIND_DEBUG").is_ok();
 
 fn allowlist_check_v4(addr: libc::sockaddr_in) -> bool {
     for allow_ip in ALLOWLIST.iter() {
@@ -137,6 +137,11 @@ fn allowlist_check_v6(addr: libc::sockaddr_in6) -> bool {
         }
     }
     false
+}
+
+#[inline]
+fn errnostr() -> String {
+    std::io::Error::from_raw_os_error(unsafe { *libc::__errno_location() }).to_string()
 }
 
 hook! {
@@ -178,6 +183,10 @@ hook! {
             _ => unreachable!()
         };
 
+        if *IS_BIND_DEBUG && res != 0 {
+            eprintln!("warn: bind() failed with errno = {:?}", errnostr());
+        }
+
         res
     }
 }
@@ -202,7 +211,7 @@ hook! {
 
                     let res = my_bind(sockfd, &addr4 as *const _ as *const _, mem::size_of::<libc::sockaddr_in>() as _);
                     if res != 0 {
-                        eprintln!("warn: bind() failed (IPv4) with errno = {:?}", std::io::Error::from_raw_os_error(*libc::__errno_location()));
+                        eprintln!("warn: bind() failed (IPv4) with errno = {:?}", errnostr());
                     }
                 }
             }
@@ -215,7 +224,7 @@ hook! {
 
                     let res = my_bind(sockfd, &addr6 as *const _ as *const _, mem::size_of::<libc::sockaddr_in6>() as _);
                     if res != 0 {
-                        eprintln!("warn: bind() failed (IPv6) with errno = {:?}", std::io::Error::from_raw_os_error(*libc::__errno_location()));
+                        eprintln!("warn: bind() failed (IPv6) with errno = {:?}", errnostr());
                     }
                 }
             }
