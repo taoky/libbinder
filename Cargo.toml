@@ -8,8 +8,8 @@ description = "Bind IP for TCP connections of arbitrary dynamic programs."
 
 [dependencies]
 ctor = "0.2.0"
-lazy_static = "1.4.0"
 libc = "0.2.142"
+libc-print = "0.1.21"
 redhook = { path = "redhook" }
 resolv-conf = "0.7.0"
 

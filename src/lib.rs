@@ -1,41 +1,96 @@
-// An equivalent C implementation I wrote before:
+// Reference implementations:
 // https://github.com/ustclug/ustcmirror-images/blob/7eab38bceeaa5a6842c626c1674fcc866f869216/yum-sync/binder.c
+// https://github.com/pdlan/binder/blob/master/binder.cc
 
-#[macro_use]
-extern crate lazy_static;
-
-use std::{env, fs::File, io::Read, mem, sync::Mutex};
+use std::{env, fs::File, io::Read, mem};
 
 use ctor::ctor;
+use libc::exit;
+use libc_print::libc_eprintln;
 use redhook::{hook, real};
 
-lazy_static! {
-    static ref IPV6: Mutex<bool> = Mutex::new(false);
-    static ref BIND: Mutex<String> = Mutex::new("".to_owned());
-    // IPs in ALLOWLIST will not be handled by bind() in connect()
-    static ref ALLOWLIST: Mutex<Vec<String>> = Mutex::new(Vec::new());
+struct AddressInfo {
+    addr_v4: libc::in_addr,
+    addr_v6: libc::in6_addr,
+    only_v6: bool,
 }
 
 extern "C" {
     fn inet_pton(af: libc::c_int, src: *const libc::c_char, dst: *mut libc::c_void) -> libc::c_int;
-    fn inet_ntop(af: libc::c_int, src: *const libc::c_void, dst: *mut libc::c_char, size: libc::socklen_t) -> *const libc::c_char;
+}
+
+// Error Enum
+#[derive(Debug)]
+enum ParseError {
+    InvalidIPv6Address,
+    InvalidIPv4Address,
+}
+
+fn parse_address(ip: &str) -> Result<AddressInfo, ParseError> {
+    let mut addr_v4: libc::in_addr = unsafe { mem::zeroed() };
+    let mut addr_v6: libc::in6_addr = unsafe { mem::zeroed() };
+    if ip.contains(':') {
+        if unsafe {
+            inet_pton(
+                libc::AF_INET6,
+                ip.as_ptr() as *const _,
+                &mut addr_v6 as *mut _ as *mut _,
+            )
+        } != 1
+        {
+            Err(ParseError::InvalidIPv6Address)
+        } else {
+            Ok(AddressInfo {
+                addr_v4,
+                addr_v6,
+                only_v6: true,
+            })
+        }
+    } else if unsafe {
+        inet_pton(
+            libc::AF_INET,
+            ip.as_ptr() as *const _,
+            &mut addr_v4 as *mut _ as *mut _,
+        )
+    } != 1
+    {
+        Err(ParseError::InvalidIPv4Address)
+    } else {
+        // IPv4-mapped IPv6 address
+        addr_v6.s6_addr[10] = 0xff;
+        addr_v6.s6_addr[11] = 0xff;
+
+        addr_v6.s6_addr[12..16].copy_from_slice(&addr_v4.s_addr.to_be_bytes());
+
+        Ok(AddressInfo {
+            addr_v4,
+            addr_v6,
+            only_v6: false,
+        })
+    }
 }
 
 #[ctor]
-fn init() {
+static ADDRESS: AddressInfo = {
     let bind_addr = match env::var("BIND_ADDRESS") {
         Ok(addr) => addr,
         Err(_) => {
-            eprintln!("BIND_ADDRESS not set, exiting");
-            std::process::exit(1);
+            libc_eprintln!("BIND_ADDRESS not set, exiting");
+            unsafe { exit(1) };
         }
     };
-    if bind_addr.contains(':') {
-        *IPV6.lock().unwrap() = true;
+    match parse_address(&bind_addr) {
+        Ok(addr) => addr,
+        Err(e) => {
+            libc_eprintln!("error: failed to parse BIND_ADDRESS {}: {:?}", bind_addr, e);
+            unsafe { exit(1) };
+        }
     }
-    *BIND.lock().unwrap() = bind_addr;
+};
 
-    // Parse resolv.conf if possible, to avoid issues under IPv6
+#[ctor]
+static ALLOWLIST: Vec<AddressInfo> = {
+    let mut res = Vec::new();
     let mut buf = Vec::with_capacity(4096);
     let f = File::open("/etc/resolv.conf")
         .and_then(|mut f| f.read_to_end(&mut buf))
@@ -44,13 +99,44 @@ fn init() {
                 .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))
         });
     if let Ok(conf) = f {
-        let mut allowlist = ALLOWLIST.lock().unwrap();
         for nameserver in conf.nameservers {
-            allowlist.push(nameserver.to_string());
+            res.push(match parse_address(&nameserver.to_string()) {
+                Ok(addr) => addr,
+                Err(_) => {
+                    libc_eprintln!("warn: failed to parse nameserver {}", nameserver);
+                    continue;
+                }
+            });
         }
     } else {
-        eprintln!("warn: failed to parse /etc/resolv.conf");
+        libc_eprintln!("warn: failed to parse /etc/resolv.conf");
     }
+
+    res
+};
+
+// #[ctor]
+// static IS_BIND_DEBUG: bool = env::var("BIND_DEBUG").is_ok();
+
+fn allowlist_check_v4(addr: libc::sockaddr_in) -> bool {
+    for allow_ip in ALLOWLIST.iter() {
+        if allow_ip.only_v6 {
+            continue;
+        }
+        if allow_ip.addr_v4.s_addr == addr.sin_addr.s_addr {
+            return true;
+        }
+    }
+    false
+}
+
+fn allowlist_check_v6(addr: libc::sockaddr_in6) -> bool {
+    for allow_ip in ALLOWLIST.iter() {
+        if allow_ip.addr_v6.s6_addr == addr.sin6_addr.s6_addr {
+            return true;
+        }
+    }
+    false
 }
 
 hook! {
@@ -59,7 +145,7 @@ hook! {
         addr: *const libc::sockaddr,
         addrlen: libc::socklen_t
     ) -> i32 => my_bind {
-        // Do nothing if sa_family is neither AF_INET or AF_INET6
+        // Do nothing if sa_family is neither AF_INET nor AF_INET6
         let sa_family = (*addr).sa_family as i32;
         if sa_family != libc::AF_INET && sa_family != libc::AF_INET6 {
             return real!(bind)(sockfd, addr, addrlen);
@@ -75,28 +161,24 @@ hook! {
             return real!(bind)(sockfd, addr, addrlen);
         }
 
-        let ipv6 = {
-            let v6 = IPV6.lock().unwrap();
-            *v6
-        };
-        let bind_addr = {
-            let addr = BIND.lock().unwrap();
-            addr.clone()
-        };
-        match ipv6 {
-            true => {
-                let mut addr6: libc::sockaddr_in6 = mem::zeroed();
-                addr6.sin6_family = libc::AF_INET6 as _;
-                inet_pton(libc::AF_INET6, bind_addr.as_ptr() as *const _, &mut addr6.sin6_addr as *mut _ as *mut _);
-                real!(bind)(sockfd, &addr6 as *const _ as *const _, mem::size_of::<libc::sockaddr_in6>() as _)
+        let res = match sa_family {
+            libc::AF_INET => {
+                if ADDRESS.only_v6 {
+                    return libc::EACCES;
+                }
+                let mut inaddr: libc::sockaddr_in = mem::transmute_copy(&*addr);
+                inaddr.sin_addr = ADDRESS.addr_v4;
+                real!(bind)(sockfd, &inaddr as *const _ as *const _, mem::size_of::<libc::sockaddr_in>() as _)
             }
-            false => {
-                let mut addr4: libc::sockaddr_in = mem::zeroed();
-                addr4.sin_family = libc::AF_INET as _;
-                inet_pton(libc::AF_INET, bind_addr.as_ptr() as *const _, &mut addr4.sin_addr as *mut _ as *mut _);
-                real!(bind)(sockfd, &addr4 as *const _ as *const _, mem::size_of::<libc::sockaddr_in>() as _)
+            libc::AF_INET6 => {
+                let mut in6addr: libc::sockaddr_in6 = mem::transmute_copy(&*addr);
+                in6addr.sin6_addr = ADDRESS.addr_v6;
+                real!(bind)(sockfd, &in6addr as *const _ as *const _, mem::size_of::<libc::sockaddr_in6>() as _)
             }
-        }
+            _ => unreachable!()
+        };
+
+        res
     }
 }
 
@@ -107,48 +189,39 @@ hook! {
         addrlen: libc::socklen_t
     ) -> i32 => my_connect {
         let sa_family = (*addr).sa_family as i32;
-        if sa_family != libc::AF_INET && sa_family != libc::AF_INET6 {
-            real!(connect)(sockfd, addr, addrlen)
-        } else {
-            let ipv6 = {
-                let v6 = IPV6.lock().unwrap();
-                *v6
-            };
-            if (sa_family == libc::AF_INET && ipv6) || (sa_family == libc::AF_INET6 && !ipv6) {
-                // casting to sockaddr_in or sockaddr_in6
-                let data = match sa_family {
-                    libc::AF_INET => {
-                        let addr4: &libc::sockaddr_in = &*(addr as *const _ as *const _);
-                        &addr4.sin_addr as *const _ as *const _
+        match sa_family {
+            libc::AF_INET => {
+                if !allowlist_check_v4(*(addr as *const _ as *const _)) {
+                    if ADDRESS.only_v6 {
+                        return libc::ECONNREFUSED;
                     }
-                    libc::AF_INET6 => {
-                        let addr6: &libc::sockaddr_in6 = &*(addr as *const _ as *const _);
-                        &addr6.sin6_addr as *const _ as *const _
-                    }
-                    _ => unreachable!()
-                };
-                // get addr string
-                let mut addr_str = [0u8; 128];
-                let addr_str_ptr = addr_str.as_mut_ptr() as *mut libc::c_char;
-                let addr_str_len = addr_str.len() as libc::socklen_t;
-                let res = inet_ntop(sa_family, data, addr_str_ptr, addr_str_len);
-                if res.is_null() {
-                    // TODO: errno
-                    return -1;
-                }
-                let ip_str = std::ffi::CStr::from_ptr(addr_str_ptr).to_str().unwrap();
-                // eprintln!("connecting to {}", ip_str);
-                for allow_ip in ALLOWLIST.lock().unwrap().iter() {
-                    if ip_str.starts_with(allow_ip) {
-                        return real!(connect)(sockfd, addr, addrlen);
+                    let mut addr4: libc::sockaddr_in = mem::zeroed();
+                    addr4.sin_family = libc::AF_INET as _;
+                    addr4.sin_addr = ADDRESS.addr_v4;
+                    addr4.sin_port = 0;
+
+                    let res = my_bind(sockfd, &addr4 as *const _ as *const _, mem::size_of::<libc::sockaddr_in>() as _);
+                    if res != 0 {
+                        eprintln!("warn: bind() failed (IPv4) with errno = {:?}", std::io::Error::from_raw_os_error(*libc::__errno_location()));
                     }
                 }
-                return -1;
             }
-            // Here we set addrlen to 0, to ensure that only our custom logic is executed
-            // Otherwise, the binded address port may not be 0, and unexpected behavior may occur
-            my_bind(sockfd, addr, 0);
-            real!(connect)(sockfd, addr, addrlen)
+            libc::AF_INET6 => {
+                if !allowlist_check_v6(*(addr as *const _ as *const _)) {
+                    let mut addr6: libc::sockaddr_in6 = mem::zeroed();
+                    addr6.sin6_family = libc::AF_INET6 as _;
+                    addr6.sin6_addr = ADDRESS.addr_v6;
+                    addr6.sin6_port = 0;
+
+                    let res = my_bind(sockfd, &addr6 as *const _ as *const _, mem::size_of::<libc::sockaddr_in6>() as _);
+                    if res != 0 {
+                        eprintln!("warn: bind() failed (IPv6) with errno = {:?}", std::io::Error::from_raw_os_error(*libc::__errno_location()));
+                    }
+                }
+            }
+            _ => {}
         }
+
+        real!(connect)(sockfd, addr, addrlen)
     }
 }
