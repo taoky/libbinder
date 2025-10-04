@@ -16,4 +16,4 @@ resolv-conf = "0.7.0"
 
 [lib]
 name = "binder"
-crate_type = ["cdylib"]
+crate-type = ["cdylib"]
