@@ -171,12 +171,12 @@ hook! {
                 if ADDRESS.only_v6 {
                     return libc::EACCES;
                 }
-                let mut inaddr: libc::sockaddr_in = mem::transmute_copy(&*addr);
+                let mut inaddr = *(addr as *const libc::sockaddr_in);
                 inaddr.sin_addr = ADDRESS.addr_v4;
                 real!(bind)(sockfd, &inaddr as *const _ as *const _, mem::size_of::<libc::sockaddr_in>() as _)
             }
             libc::AF_INET6 => {
-                let mut in6addr: libc::sockaddr_in6 = mem::transmute_copy(&*addr);
+                let mut in6addr = *(addr as *const libc::sockaddr_in6);
                 in6addr.sin6_addr = ADDRESS.addr_v6;
                 real!(bind)(sockfd, &in6addr as *const _ as *const _, mem::size_of::<libc::sockaddr_in6>() as _)
             }
