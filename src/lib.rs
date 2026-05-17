@@ -15,10 +15,6 @@ struct AddressInfo {
     only_v6: bool,
 }
 
-extern "C" {
-    fn inet_pton(af: libc::c_int, src: *const libc::c_char, dst: *mut libc::c_void) -> libc::c_int;
-}
-
 // Error Enum
 #[derive(Debug)]
 enum ParseError {
@@ -27,44 +23,33 @@ enum ParseError {
 }
 
 fn parse_address(ip: &str) -> Result<AddressInfo, ParseError> {
-    let mut addr_v4: libc::in_addr = unsafe { mem::zeroed() };
-    let mut addr_v6: libc::in6_addr = unsafe { mem::zeroed() };
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
     if ip.contains(':') {
-        if unsafe {
-            inet_pton(
-                libc::AF_INET6,
-                ip.as_ptr() as *const _,
-                &mut addr_v6 as *mut _ as *mut _,
-            )
-        } != 1
-        {
-            Err(ParseError::InvalidIPv6Address)
-        } else {
-            Ok(AddressInfo {
-                addr_v4,
-                addr_v6,
-                only_v6: true,
-            })
-        }
-    } else if unsafe {
-        inet_pton(
-            libc::AF_INET,
-            ip.as_ptr() as *const _,
-            &mut addr_v4 as *mut _ as *mut _,
-        )
-    } != 1
-    {
-        Err(ParseError::InvalidIPv4Address)
-    } else {
-        // IPv4-mapped IPv6 address
-        addr_v6.s6_addr[10] = 0xff;
-        addr_v6.s6_addr[11] = 0xff;
-
-        addr_v6.s6_addr[12..16].copy_from_slice(&addr_v4.s_addr.to_be_bytes());
-
+        let addr = ip
+            .parse::<Ipv6Addr>()
+            .map_err(|_| ParseError::InvalidIPv6Address)?;
         Ok(AddressInfo {
-            addr_v4,
-            addr_v6,
+            addr_v4: libc::in_addr { s_addr: 0 },
+            addr_v6: libc::in6_addr {
+                s6_addr: addr.octets(),
+            },
+            only_v6: true,
+        })
+    } else {
+        let addr = ip
+            .parse::<Ipv4Addr>()
+            .map_err(|_| ParseError::InvalidIPv4Address)?;
+        let octets = addr.octets();
+        let mut s6_addr = [0u8; 16];
+        s6_addr[10] = 0xff;
+        s6_addr[11] = 0xff;
+        s6_addr[12..16].copy_from_slice(&octets);
+        Ok(AddressInfo {
+            addr_v4: libc::in_addr {
+                s_addr: u32::from_ne_bytes(octets),
+            },
+            addr_v6: libc::in6_addr { s6_addr },
             only_v6: false,
         })
     }
